@@ -1,14 +1,14 @@
 # Timeline — decisions and handoff
 
-Status (2026-11-15): the timeline is a line under the planet that plays while
-the planet turns by itself. This replaces the earlier decision of the same day
+Status (2026-11-15): the timeline is a line under the planet that plays by
+itself, at the pace of the planet's turn, until the person pauses it. This replaces the earlier decision of the same day
 (a static Time slider in the bottom-right panel): with more instants per layer
 there is enough temporal resolution to make the movement worth watching and
 hearing.
 
 Try it: `docker compose up web`, open <http://127.0.0.1:5173/>, pick
-**Wildfire smoke**, **Atmospheric CO2** or **Lightning** and let the planet
-turn. The dev page <http://127.0.0.1:5173/timeline-check.html> still exercises
+**Wildfire smoke**, **Atmospheric CO2** or **Lightning** and watch it
+play; **❚❚ Pause** on the line stops it. The dev page <http://127.0.0.1:5173/timeline-check.html> still exercises
 the play/pause clock of `playback.ts`, which the app no longer uses.
 
 ## Decisions
@@ -16,8 +16,8 @@ the play/pause clock of `playback.ts`, which the app no longer uses.
 | Decision | Choice | Why |
 |---|---|---|
 | Where | **A line centred under the planet**: the bottom row of the HUD is three columns (`minmax(0,1fr) auto minmax(0,1fr)`), so the middle one sits on the planet's centre line (wide screens, `lg` and up); its own row on narrow screens | The timeline belongs to the picture, not to the sound controls. |
-| What drives it | **The planet's own turn** (`EarthMesh` → `onSpin`) | The timeline moves exactly while, and as fast as, the planet turns: a drag, Auto-rotate off and the map view (where the planet does not turn) pause it. |
-| Pace | **One turn = one day** of hourly data (smoke), **30 days** of daily data (CO2), **one year** of monthly data (lightning) | Smoke turns with the planet like the real Earth; lightning shows the seasons once per turn. At `SPIN_SPEED` (0.08 rad/s, about 78 s per turn) an hour of smoke lasts about 3.3 s and a month of lightning about 6.5 s. |
+| What drives it | **Its own clock at the planet's pace** (`playDelta` in `App.tsx`, `SECONDS_PER_TURN`) and a **❚❚ Pause / ▶ Play** button on the line | Team decision (2026-11-15): zooming into a region paused the data, and it should keep going. Only the person pauses it; a zoom, the map view, a drag and Auto-rotate off do not. One turn's time still covers the same real time, so `1 turn = 4 days` stays true. |
+| Pace | **One turn = one day** of hourly data (smoke), **30 days** of daily data (CO2), **one year** of monthly data (lightning) | While the planet turns by itself, smoke moves with it like the real Earth (with the planet stopped the data keeps the same pace); lightning shows the seasons once per turn. At `SPIN_SPEED` (0.08 rad/s, about 78 s per turn) an hour of smoke lasts about 3.3 s and a month of lightning about 6.5 s. |
 | Marks | **One per instant, placed by its real time**; the marks that start a day (hourly) or a year (monthly) are labelled | A gap in the data would show as a gap on the line. Layers without times (sample data) are evenly spaced. |
 | Between instants | **Crossfade** of the picture (two textures and `uFrameMix` in the shader) and **the same blend in the sound** (`framePosition`) | Picture and sound stay together and the animation is smooth. `?lite=1` keeps the nearest instant alone. |
 | Date shown | The **nearest** instant's label | Matches what the picture is closest to. |
@@ -25,7 +25,7 @@ the play/pause clock of `playback.ts`, which the app no longer uses.
 | Dragging the line | **The planet keeps turning**; playing goes on from the picked moment | Decision of 2026-11-15. |
 | Forest (static) | A **dimmed line** with its one period, `Apr 2019 – Jul 2025` | The layout does not jump when the layer changes. |
 | End of the data | **Starts again** from the beginning | Like the demo loop. |
-| State update rate | **About 30 Hz** (`SpinAccumulator`) | Enough for audio and the playhead without re-rendering the app 60 times a second. The fade amount is read from a ref on every animation frame. |
+| State update rate | **About 30 Hz** (`SpinAccumulator`, fed by the clock) | Enough for audio and the playhead without re-rendering the app 60 times a second. The fade amount is read from a ref on every animation frame. |
 
 ## Data per layer (see `data/SOURCES.md`)
 
@@ -54,16 +54,16 @@ browser can hold every instant.
 - `web/src/lib/timeline.ts`: `frameBlend`, `framePosition`, `frameIndexAt`,
   `dateLabelAt`.
 - `web/src/timeline/TimelineProvider.tsx`: shared position; `useTimeline()`
-  for readers, `useTimelineActions()` (`seek`, `step`) for the turning planet,
+  for readers, `useTimelineActions()` (`seek`, `step`) for the timeline clock,
   which does not re-render as the position moves.
 - `web/src/ui/TimelineTrack.tsx`: the line. `data-testid`: `timeline-track`,
   `timeline-scrub` (the `role="slider"` line), `timeline-date-<id>`,
-  `timeline-playing`, `timeline-speed-<4|8>`, `timeline-turn`. Keys: ←/→
+  `timeline-play` (pause button), `timeline-playing` ("fixed layer"), `timeline-speed-<4|8>`, `timeline-turn`. Keys: ←/→
   one instant, Page Up/Down one turn, Home/End.
 - `web/src/scene/layerTexture.ts`: `showLayerBlend(textures, layer, from, to)`
   keeps the earlier and later instants; moving on by one only computes the new
   later one.
-- `web/src/App.tsx`: `PlanetView` turns `onSpin` into `step`; `FrameTracker`
+- `web/src/App.tsx`: `PlanetView` runs the timeline clock (`playDelta` → `step`) and holds the pause state; `FrameTracker`
   reports the pair of instants and puts the fade amount in a ref;
   `AudioListener` samples the same blend.
 

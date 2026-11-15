@@ -44,7 +44,7 @@ count, who tested). Planet-specific checks during development are in
 - [ ] **Layers are recognisable (FR3)**: with eyes closed, a person outside the team says which layer is playing and whether its value is high or low, in **4 of 5** tries. Person 1: __/5 · Person 2: __/5
 - [ ] **Solo layer without clipping**: with one layer active for **1 minute**, the output meter never reaches the maximum and the layer does not drop out. (The old FR4 test of four mixed layers was retired by the 2026-11-15 team decision: only the picked layer sounds.)
 - [ ] **One layer at a time**: picking a layer plays only its voice; picking another one switches the sound to it; Earth (no layer) is silent
-- [ ] **Latency (NFR2)**: from moving the cursor or clicking to the sound changing, **100 ms or less**: ______ ms
+- [ ] **Latency (NFR2)**: from clicking or dragging the selected point in the regional map to the sound changing, **100 ms or less**: ______ ms
 - [ ] **No clicks**: moving the cursor across the edge of the Amazon rectangle gives no audible jump
 - [ ] **Left / right (FR3.4)**: moving the point across the screen moves the sound between the speakers
 
@@ -53,7 +53,7 @@ count, who tested). Planet-specific checks during development are in
 - [ ] **Planet (FR5)**: opens on the 3D planet, which can be turned, with the layers visible
 - [ ] **To the Amazon and back (FR5.2)**: each transition takes **2 s or less**, with no sound cut. Out: ____ s · Back: ____ s
 - [ ] **Frame rate (NFR3)**: planet, transition, map and timeline at **30 fps or more**. Lowest seen: ____ fps
-- [ ] **Timeline (FR7)**: the line under the planet plays while the planet turns by itself (one turn = one day of smoke, 30 days of CO2, one year of lightning) and pauses on a drag, with Auto-rotate off and on the map; it sits centred under the planet; it starts at 4× (`1 turn = 4 days` for smoke), 8× doubles it and `1 turn = …` changes to match, and there is no 1× or 2×; clicking or dragging the line picks a moment and the playing goes on from there; the forest shows a dimmed line with its single period; picture and sound fade together from one instant to the next
+- [ ] **Timeline (FR7)**: the line under the planet plays by itself at the planet's pace (one turn = one day of smoke, 30 days of CO2, one year of lightning) and keeps playing on a drag, with Auto-rotate off and when zoomed into a region or on the map; **❚❚ Pause** stops it and **▶ Play** goes on from there; it sits centred under the planet; it starts at 4× (`1 turn = 4 days` for smoke), 8× doubles it and `1 turn = …` changes to match, and there is no 1× or 2×; clicking or dragging the line picks a moment and the playing goes on from there; the forest shows a dimmed line with its single period; picture and sound fade together from one instant to the next
 - [ ] **Story mode (FR8)**: runs through forest, smoke and CO2 in **under 60 s**: ____ s. The text presents CO2 as global context, not as a measured effect of the Amazon
 
 ## 5. Accessibility (FR9)

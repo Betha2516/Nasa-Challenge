@@ -26,6 +26,7 @@ import {
   type Texture,
   type WebGLRenderer,
 } from "three";
+import type { VisibleField } from "../audio/overview";
 import type { JukeboxData, LoadedLayer } from "../data/types";
 import type { SceneDefinition } from "../scenes/types";
 import { sceneMapPosition } from "../scenes/geometry";
@@ -81,8 +82,6 @@ export interface EarthSceneProps {
   lite: boolean;
   /** The "Auto-rotate" switch: the planet turns by itself on the planet view. */
   autoRotate: boolean;
-  /** The planet turned by itself by this angle (radians) this frame; drives the timeline. */
-  onSpin?: (radians: number) => void;
   onRequestView: (view: TargetView) => void;
   /**
    * Regions of the world, the Amazon first (regions.ts); they are outlined and can be
@@ -107,6 +106,8 @@ export interface EarthSceneProps {
   /** Scene whose popup is open; the map zooms towards its point. */
   focusedScene?: SceneDefinition | null;
   onSceneHover?: (scene: SceneDefinition | null, clientX?: number, clientY?: number) => void;
+  /** Visible screen field for the overview scan; null while the globe is not visible. */
+  onOverviewField?: (field: VisibleField | null) => void;
 }
 
 const CAMERA_FOV = 45;
@@ -288,7 +289,6 @@ function SceneContents(props: SceneContentsProps) {
     targetView,
     lite,
     autoRotate,
-    onSpin,
     regions,
     focusRegionId,
     onRequestView,
@@ -302,6 +302,7 @@ function SceneContents(props: SceneContentsProps) {
     onSceneSelect,
     onSceneHover,
     focusedScene,
+    onOverviewField,
     setListeningPoint,
   } = props;
   const selectedPoint = useListeningPoint();
@@ -767,7 +768,6 @@ function SceneContents(props: SceneContentsProps) {
         segments={lite ? LITE_SEGMENTS : FULL_SEGMENTS}
         raiseRelief={!lite}
         autoRotate={autoRotate}
-        onSpin={onSpin}
         frameMix={frameMix}
         reliefImages={reliefImages}
         dotImage={dotImage}
@@ -783,6 +783,7 @@ function SceneContents(props: SceneContentsProps) {
         onMapBack={handleMapBack}
         onGlobeTap={handleGlobeTap}
         onMapTap={handleMapTap}
+        onOverviewField={onOverviewField}
       />
       <FpsProbe onFps={onFps} />
     </>

@@ -56,7 +56,8 @@ describe("timeline line text", () => {
     expect(timelineTrackSource).toContain("data-testid={`timeline-speed-${value}`}");
   });
 
-  it("has no play or pause button: the planet's turn plays it", () => {
-    expect(timelineTrackSource).not.toContain(`data-testid="timeline-play"`);
+  it("has a pause button, so only the person stops the timeline", () => {
+    expect(timelineTrackSource).toContain(`data-testid="timeline-play"`);
+    expect(timelineTrackSource).toContain("onClick={onTogglePlay}");
   });
 });

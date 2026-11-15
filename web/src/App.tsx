@@ -8,13 +8,15 @@ import {
   type ReactNode,
 } from "react";
 import { AudioStart } from "./audio/AudioStart";
+import { DataAudio } from "./audio/DataAudio";
 import type { SoundEngine } from "./audio/engine";
+import type { VisibleField } from "./audio/overview";
 import { useSoundEngine } from "./audio/useSoundEngine";
 import { loadJukeboxData } from "./data/loadManifest";
 import type { JukeboxData, LoadedLayer } from "./data/types";
 import { sampleLayerAt } from "./lib/interpolate";
-import { frameBlend, frameIndexAt, framePosition } from "./lib/timeline";
-import { SpinAccumulator, positionPerTurn } from "./lib/timelineTrack";
+import { frameBlend, frameIndexAt } from "./lib/timeline";
+import { SpinAccumulator, playDelta, positionPerTurn } from "./lib/timelineTrack";
 import { EarthScene, type Probe, type TargetView } from "./scene/EarthScene";
 import { loadScenes } from "./scenes/loadScenes";
 import type { SceneDefinition, ScenesManifest } from "./scenes/types";
@@ -51,6 +53,7 @@ function readLiteMode(search: string): boolean {
 
 interface PlanetViewProps {
   data: JukeboxData;
+  engine: SoundEngine;
   lite: boolean;
   audio?: ReactNode;
   /** The layer picker's value: a layer id or EARTH_VIEW_ID. */
@@ -66,6 +69,7 @@ interface PlanetViewProps {
 /** The planet, the Amazon map and their controls, once the data is loaded. Starts on the plain Earth, with no layer drawn. */
 function PlanetView({
   data,
+  engine,
   lite,
   audio,
   activeLayerId,
@@ -90,6 +94,10 @@ function PlanetView({
   const [sceneHover, setSceneHover] = useState<{ scene: SceneDefinition; x: number; y: number } | null>(null);
   // The planet starts turning by itself; the "Auto-rotate" switch stops it.
   const [autoRotate, setAutoRotate] = useState(true);
+  const overviewFieldRef = useRef<VisibleField | null>(null);
+  const handleOverviewField = useCallback((field: VisibleField | null) => {
+    overviewFieldRef.current = field;
+  }, []);
 
   // null: the plain Earth view, no layer drawn.
   const activeLayer = useMemo(
@@ -106,20 +114,33 @@ function PlanetView({
         ? tracked
         : framesAt(positionRef.current, layerFrames, !lite);
   const frame = frames.nearest;
-  // The timeline plays with the planet's own turn: one turn moves it by a day of
-  // hourly data or a year of monthly data (positionPerTurn). Handed on about 30
-  // times a second; a drag, Auto-rotate off or the map view stop the turn and so
-  // the timeline. Only the actions are read here, so this view does not re-render
-  // as the timeline moves.
+  // The timeline plays on its own clock at the pace of the planet's turn: one
+  // turn's time moves it by a day of hourly data or a year of monthly data
+  // (positionPerTurn). Only the person pauses it (the pause button on the line);
+  // a zoom into a region, a drag or Auto-rotate off do not. Handed on about 30
+  // times a second; only the actions are read here, so this view does not
+  // re-render as the timeline moves.
   const { step } = useTimelineActions();
+  const [timelinePlaying, setTimelinePlaying] = useState(true);
   const perTurnRef = useRef(0);
   perTurnRef.current = activeLayer ? positionPerTurn(activeLayer.manifest) : 0;
-  const spinRef = useRef<SpinAccumulator | null>(null);
-  spinRef.current ??= new SpinAccumulator(1000 / TIMELINE_UPDATE_HZ, step);
-  useEffect(() => spinRef.current?.reset(), [activeLayer]);
-  const handleSpin = useCallback((radians: number) => {
-    spinRef.current?.add((radians / (2 * Math.PI)) * perTurnRef.current, performance.now());
-  }, []);
+  const clockRef = useRef<SpinAccumulator | null>(null);
+  clockRef.current ??= new SpinAccumulator(1000 / TIMELINE_UPDATE_HZ, step);
+  useEffect(() => clockRef.current?.reset(), [activeLayer]);
+  // No clock for the plain Earth view or a static layer: nothing would move.
+  const timelineMoves = perTurnRef.current > 0;
+  useEffect(() => {
+    if (!timelinePlaying || !timelineMoves) return;
+    let frameId = 0;
+    let last = performance.now();
+    const tick = (now: number): void => {
+      clockRef.current?.add(playDelta((now - last) / 1000, perTurnRef.current), now);
+      last = now;
+      frameId = requestAnimationFrame(tick);
+    };
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [timelinePlaying, timelineMoves]);
   const selectedPoint = useListeningPoint();
   const selectedValue =
     selectedPoint && activeLayer
@@ -225,7 +246,6 @@ function PlanetView({
           targetView={targetView}
           lite={lite}
           autoRotate={autoRotate}
-          onSpin={handleSpin}
           onRequestView={requestView}
           regions={regions}
           focusRegionId={focusRegionId}
@@ -239,8 +259,17 @@ function PlanetView({
           onSceneSelect={handleSceneSelect}
           onSceneHover={handleSceneHover}
           focusedScene={focusedScene}
+          onOverviewField={handleOverviewField}
         />
       </div>
+      <DataAudio
+        data={data}
+        engine={engine}
+        activeLayer={activeLayer}
+        mode={mode}
+        fade={!lite}
+        overviewFieldRef={overviewFieldRef}
+      />
       <PlanetHud
         layers={data.layers}
         activeLayerId={activeLayer?.manifest.id ?? EARTH_VIEW_ID}
@@ -260,7 +289,11 @@ function PlanetView({
         audio={audio}
         timeline={
           activeLayer ? (
-            <TimelineControls layer={activeLayer} playing={autoRotate && mode === "globe"} />
+            <TimelineControls
+              layer={activeLayer}
+              playing={timelinePlaying}
+              onTogglePlay={() => setTimelinePlaying((playing) => !playing)}
+            />
           ) : undefined
         }
         onShowTour={onShowTour}
@@ -337,62 +370,18 @@ function FrameTracker({
 }
 
 /**
- * Feeds the sound engine from the point under the cursor and the shared
- * timeline position (plan Step 10, FR3, FR6 and FR7). Lives inside
- * ListeningPointProvider, so the scene publishes the point without knowing
- * about audio. The timeline moves with the planet's turn and with the line
- * under the planet.
- */
-function AudioListener({
-  data,
-  engine,
-  fade,
-}: {
-  data: JukeboxData;
-  engine: SoundEngine;
-  /** Blend the two instants around the position like the picture does (off in lite mode). */
-  fade: boolean;
-}) {
-  const point = useListeningPoint();
-  const { position } = useTimeline();
-
-  useEffect(() => {
-    if (!point) {
-      for (const layer of data.layers) {
-        engine.setLayerIntensity(layer.manifest.id, null);
-      }
-      return;
-    }
-    for (const layer of data.layers) {
-      // Shared normalized position -> the same blend of the two instants around
-      // it that the picture fades between (the nearest instant alone in lite
-      // mode), so what is heard is what is seen. Static layers have one frame,
-      // so this is 0 and sampleLayerAt ignores time for them.
-      const frame = fade
-        ? framePosition(position, layer.region.frames)
-        : frameIndexAt(position, layer.region.frames);
-      engine.setLayerIntensity(
-        layer.manifest.id,
-        sampleLayerAt(layer, data.bbox, point.lon, point.lat, frame),
-      );
-    }
-    engine.setPan(point.screenX);
-  }, [engine, data, point, position, fade]);
-
-  return null;
-}
-
-/**
  * The timeline line bound to the shared clock. Only this component reads the
  * clock, so the moving playhead re-renders it alone, not the planet view around it.
  */
-function TimelineControls({ layer, playing }: { layer: LoadedLayer; playing: boolean }) {
+function TimelineControls(props: { layer: LoadedLayer; playing: boolean; onTogglePlay: () => void }) {
+  const { layer, playing, onTogglePlay } = props;
   const timeline = useTimeline();
   return (
     <TimelineTrack
       position={timeline.position}
       layer={layer}
       playing={playing}
+      onTogglePlay={onTogglePlay}
       onSeek={timeline.seek}
       speed={timeline.speed}
       onSpeed={timeline.setSpeed}
@@ -506,6 +495,7 @@ function JukeboxView({ data, lite }: { data: JukeboxData; lite: boolean }) {
     <>
       <PlanetView
         data={data}
+        engine={engine}
         lite={lite}
         audio={<AudioStart engine={engine} className="w-full sm:w-56" />}
         activeLayerId={activeLayerId}
@@ -516,7 +506,6 @@ function JukeboxView({ data, lite }: { data: JukeboxData; lite: boolean }) {
         onCloseScene={closeScene}
         focusedScene={openScene}
       />
-      <AudioListener data={data} engine={engine} fade={!lite} />
       {openScene && (
         <ScenePopup scene={openScene} onClose={closeScene} audioError={sceneAudioError} />
       )}

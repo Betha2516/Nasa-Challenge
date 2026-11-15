@@ -15,7 +15,7 @@ Write the result (pass / fail and a note) next to each line.
 ## Planet (FR1)
 
 - [ ] The planet appears with `earth.jpg` and turns slowly by itself.
-- [ ] Dragging with the mouse turns it; on release it keeps turning (FR1.1).
+- [ ] Dragging with the mouse turns it; on release it keeps turning (FR1.1). On a touch screen a finger drag turns it. Point locking belongs to the regional map, not the globe.
 - [ ] With **Forest height** active, the tall forest areas (Amazon, Congo,
       South-East Asia) are the most intense green and sit on the land of the
       base image, not shifted (FR1.2).
@@ -25,8 +25,9 @@ Write the result (pass / fail and a note) next to each line.
 
 ## Transition and map (FR2, FR3)
 
-- [ ] Clicking inside the Amazon starts the transition; clicking the ocean
-      does nothing.
+- [ ] Double-clicking inside any region starts the transition; double-clicking
+      the ocean does nothing. A single click on the globe does not change the
+      sound.
 - [ ] The **Amazon** button does the same.
 - [ ] Way there: the planet turns to the Amazon, flattens and the camera
       closes in. Time it (stopwatch or a screen recording): **2 s or less**

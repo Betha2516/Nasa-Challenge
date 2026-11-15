@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Cadence, LayerManifest } from "../data/types";
 import {
+  SECONDS_PER_TURN,
   SpinAccumulator,
+  playDelta,
   DEFAULT_TIMELINE_SPEED,
   TIMELINE_SPEEDS,
   cadenceText,
@@ -161,5 +163,25 @@ describe("marks on the line", () => {
     expect(cadenceText({ unit: "hour", count: 6 })).toBe("every 6 hours");
     expect(cadenceText(monthly)).toBe("every month");
     expect(cadenceText(undefined)).toBe("");
+  });
+});
+
+describe("the timeline's own clock", () => {
+  it("moves one turn's worth of timeline in the time the planet takes to turn once", () => {
+    const perTurn = 0.25;
+    let moved = 0;
+    for (let t = 0; t < SECONDS_PER_TURN; t += 0.05) moved += playDelta(Math.min(0.05, SECONDS_PER_TURN - t), perTurn);
+    expect(moved).toBeCloseTo(perTurn, 6);
+  });
+
+  it("does not jump when a background tab comes back after a long pause", () => {
+    expect(playDelta(30, 1)).toBe(playDelta(0.1, 1));
+  });
+
+  it("does not move for no time, negative time or a broken pace", () => {
+    expect(playDelta(0, 1)).toBe(0);
+    expect(playDelta(-1, 1)).toBe(0);
+    expect(playDelta(Number.NaN, 1)).toBe(0);
+    expect(playDelta(0.05, Number.NaN)).toBe(0);
   });
 });

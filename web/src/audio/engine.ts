@@ -10,6 +10,17 @@
 
 import { LAYER_IDS, type LayerId } from "../data/types";
 import { clampUnit, co2ToBreath, forestToVoice, intensityToGain, lightningToPercussion, positionToPan, smokeToTimbre } from "./mapping";
+import {
+  OVERVIEW_BASE_HZ,
+  OVERVIEW_COLUMNS,
+  OVERVIEW_INSTRUMENTS,
+  OVERVIEW_LAYER_GAIN,
+  OVERVIEW_ROWS,
+  REGIONAL_ENRICHMENT,
+  pitchForValue,
+  type OverviewColumn,
+} from "./overview";
+import { TEMPO_STYLES, lightningBpm } from "./tempo";
 import { DEFAULT_SMOOTHING_SECONDS, OnePoleSmoother } from "./smoothing";
 
 export type SoundEngineState = "idle" | "running" | "suspended";
@@ -24,6 +35,21 @@ export interface SoundEngine {
   setLayerEnabled(layer: LayerId, enabled: boolean): void;
   /** Horizontal position across the listened area, 0 (left) .. 1 (right). */
   setPan(horizontal: number): void;
+  /** Replaces the overview field; the scan reads it while enabled. */
+  setOverview(layer: LayerId | null, columns: readonly OverviewColumn[] | null): void;
+  /** Starts or stops the visible-area field. */
+  setOverviewEnabled(enabled: boolean): void;
+  /** Adds or removes the randomly spaced forest bird samples. */
+  setForestBirds(enabled: boolean): void;
+  /** Plays one data-time mark for a timed layer. */
+  playTempoBeat(layer: LayerId): void;
+  /** One regional note: layer value -> pitch in the visible range, selected screen x -> pan. */
+  setRegionalPoint(
+    layer: LayerId | null,
+    value: number | null,
+    horizontal: number,
+    range?: { min: number; max: number },
+  ): void;
   setMasterVolume(value: number): void;
   /** Current output level in 0..1, for a meter. */
   getOutputLevel(): number;
@@ -53,6 +79,12 @@ export interface SoundEngineOptions {
   lightningSampleUrl?: string | null;
   /** Injected sample buffer (tests); skips the network. */
   lightningSample?: AudioBuffer | null;
+  /** Forest bird sample; `null` disables the ambience. */
+  birdSampleUrl?: string | null;
+  /** Injected bird sample (tests); skips the network. */
+  birdSample?: AudioBuffer | null;
+  /** Random source for bird spacing and excerpt offsets (tests). */
+  random?: () => number;
   /** Loader injection for tests; defaults to `fetch`. */
   fetchSample?: (url: string) => Promise<ArrayBuffer>;
 }
@@ -85,6 +117,21 @@ const SCENE_LOOP_GAIN_MULTIPLIER = 2;
 const SCENE_LOOP_MAX_GAIN = 2;
 const SCENE_FADE_IN_SECONDS = 0.5;
 const SCENE_FADE_OUT_SECONDS = 0.3;
+const OVERVIEW_BUS_GAIN = 0.75;
+const OVERVIEW_COLUMN_HEADROOM = 0.9;
+/** Existing forest recording used as a sparse bird ambience. */
+export const FOREST_BIRD_SAMPLE_URL = "./audio/samples/oajaros-suaves.ogg";
+const BIRD_BUS_GAIN = 0.55;
+const BIRD_FIRST_DELAY_MIN_SECONDS = 1;
+const BIRD_FIRST_DELAY_MAX_SECONDS = 4;
+const BIRD_GAP_MIN_SECONDS = 6;
+const BIRD_GAP_MAX_SECONDS = 14;
+const BIRD_EXCERPT_MIN_SECONDS = 2;
+const BIRD_EXCERPT_MAX_SECONDS = 5;
+const BIRD_GAIN = 0.7;
+const BIRD_ATTACK_SECONDS = 0.04;
+const BIRD_FADE_SECONDS = 0.25;
+const REGIONAL_POINT_GAIN = 0.35;
 
 /**
  * Per-layer output trim. The smoke voice is mostly filtered noise and a low
@@ -134,6 +181,58 @@ interface Co2Voice {
 interface LightningVoice {
   gain: GainNode;
   panner: StereoPannerNode;
+}
+
+interface OverviewColumnVoice {
+  oscillators: OscillatorNode[];
+  gains: GainNode[];
+  filter: BiquadFilterNode;
+  panner: StereoPannerNode;
+}
+
+interface OverviewGraph {
+  columns: OverviewColumnVoice[];
+  bus: GainNode;
+}
+
+interface OverviewState {
+  layer: LayerId | null;
+  columns: readonly OverviewColumn[];
+  enabled: boolean;
+}
+
+interface RegionalFx {
+  dry: GainNode;
+  chorusSend: GainNode;
+  chorusDelay: DelayNode;
+  chorusWet: GainNode;
+  chorusLfo: OscillatorNode;
+  chorusDepth: GainNode;
+  reverbSend: GainNode;
+  reverb: ConvolverNode;
+  reverbWet: GainNode;
+}
+
+interface RegionalVoice {
+  oscillators: OscillatorNode[];
+  oscillatorGains: GainNode[];
+  filter: BiquadFilterNode;
+  gain: GainNode;
+  panner: StereoPannerNode;
+  fx: RegionalFx;
+  sampleSource: AudioBufferSourceNode | null;
+  sampleFilter: BiquadFilterNode | null;
+  sampleGain: GainNode | null;
+  sampleLayer: LayerId | null;
+  sampleToken: number;
+}
+
+interface RegionalState {
+  layer: LayerId | null;
+  value: number | null;
+  pan: number;
+  min: number;
+  max: number;
 }
 
 interface EngineGraph {
@@ -208,6 +307,32 @@ export class WebAudioSoundEngine implements SoundEngine {
   private readonly fetchSample: (url: string) => Promise<ArrayBuffer>;
   private lightningSample: AudioBuffer | null;
   private lightningSampleLoad: Promise<void> | null = null;
+  private overviewGraph: OverviewGraph | undefined;
+  private readonly birdSampleUrl: string | null;
+  private readonly random: () => number;
+  private birdSample: AudioBuffer | null;
+  private birdSampleLoad: Promise<AudioBuffer | null> | null = null;
+  private forestBirdsEnabled = false;
+  private birdStarted = false;
+  private birdTimer: ReturnType<typeof setTimeout> | undefined;
+  private birdBus: GainNode | undefined;
+  private readonly birdHits = new Set<LightningHit>();
+  private readonly tempoHits = new Set<LightningHit>();
+  private regionalVoice: RegionalVoice | undefined;
+  private regionalLightningTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly regionalLightningHits = new Set<LightningHit>();
+  private readonly regional: RegionalState = {
+    layer: null,
+    value: null,
+    pan: 0.5,
+    min: 0,
+    max: 1,
+  };
+  private readonly overview: OverviewState = {
+    layer: null,
+    columns: [],
+    enabled: false,
+  };
 
   /** Keeps `state` honest when the browser or the OS suspends the context. */
   private readonly handleContextStateChange = (): void => {
@@ -216,9 +341,16 @@ export class WebAudioSoundEngine implements SoundEngine {
     const state = context.state as string;
     if (state === "running") {
       if (this.currentState !== "idle") this.currentState = "running";
+      this.startOverview();
+      this.startForestBirds();
+      this.startRegional();
     } else if (this.currentState === "running") {
       this.currentState = "suspended";
       this.clearLightning();
+      this.fadeOverview(0);
+      this.stopForestBirds();
+      this.clearTempoHits();
+      this.clearRegionalLightning();
       this.stopSceneAudio();
     }
   };
@@ -230,6 +362,9 @@ export class WebAudioSoundEngine implements SoundEngine {
     this.lightningSampleUrl =
       options.lightningSampleUrl === undefined ? DEFAULT_LIGHTNING_SAMPLE_URL : options.lightningSampleUrl;
     this.lightningSample = options.lightningSample ?? null;
+    this.birdSampleUrl = options.birdSampleUrl === undefined ? FOREST_BIRD_SAMPLE_URL : options.birdSampleUrl;
+    this.birdSample = options.birdSample ?? null;
+    this.random = options.random ?? Math.random;
     this.fetchSample =
       options.fetchSample ??
       (async (url: string) => {
@@ -284,6 +419,9 @@ export class WebAudioSoundEngine implements SoundEngine {
       this.applyLayer(layer, true);
     }
     this.applyPan(now);
+    this.startOverview();
+    this.startForestBirds();
+    this.startRegional();
   }
 
   stop(): void {
@@ -297,6 +435,11 @@ export class WebAudioSoundEngine implements SoundEngine {
     this.currentState = "suspended";
     this.clearSettleTimers();
     this.clearLightning();
+    this.fadeOverview(0);
+    this.stopForestBirds();
+    this.clearTempoHits();
+    this.clearRegionalLightning();
+    this.fadeRegional(0);
     this.stopSceneAudio();
     this.setDataVoiceDuck(1, 0.1);
 
@@ -331,6 +474,495 @@ export class WebAudioSoundEngine implements SoundEngine {
     }
   }
 
+  setOverview(layer: LayerId | null, columns: readonly OverviewColumn[] | null): void {
+    const nextColumns = columns ?? [];
+    const layerChanged = layer !== this.overview.layer;
+    this.overview.layer = layer;
+    this.overview.columns = nextColumns;
+    if (layer === null || nextColumns.length === 0) {
+      this.fadeOverview(0);
+      return;
+    }
+    if (!this.overview.enabled || this.currentState !== "running") return;
+    if (layerChanged) this.applyOverviewInstrument();
+    this.startOverview();
+  }
+
+  setOverviewEnabled(enabled: boolean): void {
+    this.overview.enabled = enabled;
+    if (!enabled) {
+      this.fadeOverview(0);
+      return;
+    }
+    if (
+      !this.overview.layer ||
+      this.overview.columns.length === 0 ||
+      this.currentState !== "running"
+    ) {
+      return;
+    }
+    this.startOverview();
+  }
+
+  setForestBirds(enabled: boolean): void {
+    this.forestBirdsEnabled = enabled;
+    if (!enabled) {
+      this.stopForestBirds();
+      return;
+    }
+    if (this.currentState === "running") this.startForestBirds();
+  }
+
+  playTempoBeat(layer: LayerId): void {
+    const context = this.context;
+    const graph = this.graph;
+    const style = TEMPO_STYLES[layer];
+    if (!context || !graph || !style || this.currentState !== "running") return;
+
+    const now = context.currentTime;
+    const oscillator = context.createOscillator();
+    oscillator.type = style.wave;
+    oscillator.frequency.setValueAtTime(style.frequencyHz, now);
+
+    const gain = context.createGain();
+    oscillator.connect(gain);
+    gain.connect(graph.bus);
+    const end = now + Math.max(0.02, style.durationSeconds);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(style.gain, now + Math.max(0.002, style.attackSeconds));
+    gain.gain.exponentialRampToValueAtTime(0.0001, end);
+    oscillator.start(now);
+    oscillator.stop(end + 0.02);
+
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        oscillator.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      try {
+        gain.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      this.tempoHits.delete(hit);
+    };
+    const hit: LightningHit = {
+      stop: () => {
+        try {
+          oscillator.stop();
+        } catch {
+          // Already stopped.
+        }
+        cleanup();
+      },
+    };
+    oscillator.onended = cleanup;
+    this.tempoHits.add(hit);
+  }
+
+  setRegionalPoint(
+    layer: LayerId | null,
+    value: number | null,
+    horizontal: number,
+    range?: { min: number; max: number },
+  ): void {
+    this.regional.layer = layer;
+    this.regional.value =
+      value === null || !Number.isFinite(value) ? null : clampUnit(value);
+    this.regional.pan = clampUnit(horizontal);
+    this.regional.min = range && Number.isFinite(range.min) ? clampUnit(range.min) : 0;
+    this.regional.max = range && Number.isFinite(range.max) ? clampUnit(range.max) : 1;
+
+    if (layer === "lightning") {
+      if (this.regionalVoice) {
+        this.fadeRegional(0);
+        this.stopRegionalSample(this.regionalVoice);
+      }
+      if (this.currentState === "running" && this.regional.value !== null) {
+        this.startRegionalLightning();
+      } else {
+        this.clearRegionalLightning();
+      }
+      return;
+    }
+
+    this.clearRegionalLightning();
+    if (this.currentState === "running" && layer && this.regional.value !== null) {
+      this.ensureRegionalVoice();
+      this.applyRegionalPoint();
+    } else if (this.regionalVoice) {
+      this.fadeRegional(0);
+      this.fadeRegionalSample(0);
+    }
+  }
+
+  private ensureRegionalVoice(): RegionalVoice | undefined {
+    const context = this.context;
+    const graph = this.graph;
+    if (!context || !graph) return undefined;
+    if (this.regionalVoice) return this.regionalVoice;
+    const filter = context.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 1600;
+    filter.Q.value = 0.9;
+    const gain = context.createGain();
+    gain.gain.value = 0;
+    const panner = context.createStereoPanner();
+    panner.pan.value = 0;
+    filter.connect(gain);
+    gain.connect(panner);
+
+    const oscillators: OscillatorNode[] = [];
+    const oscillatorGains: GainNode[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.value = OVERVIEW_BASE_HZ;
+      const oscillatorGain = context.createGain();
+      oscillatorGain.gain.value = index === 0 ? 1 : 0;
+      oscillator.connect(oscillatorGain);
+      oscillatorGain.connect(filter);
+      oscillator.start();
+      oscillators.push(oscillator);
+      oscillatorGains.push(oscillatorGain);
+    }
+
+    const fx = this.buildRegionalFx(context, graph.bus, panner);
+    const voice: RegionalVoice = {
+      oscillators,
+      oscillatorGains,
+      filter,
+      gain,
+      panner,
+      fx,
+      sampleSource: null,
+      sampleFilter: null,
+      sampleGain: null,
+      sampleLayer: null,
+      sampleToken: 0,
+    };
+    this.regionalVoice = voice;
+    return voice;
+  }
+
+  private buildRegionalFx(context: AudioContext, bus: GainNode, source: StereoPannerNode): RegionalFx {
+    const dry = context.createGain();
+    dry.gain.value = 0.78;
+    source.connect(dry);
+    dry.connect(bus);
+
+    const chorusSend = context.createGain();
+    chorusSend.gain.value = 0;
+    const chorusDelay = context.createDelay(0.1);
+    chorusDelay.delayTime.value = 0.025;
+    const chorusWet = context.createGain();
+    chorusWet.gain.value = 0.55;
+    const chorusLfo = context.createOscillator();
+    chorusLfo.type = "sine";
+    chorusLfo.frequency.value = 0.33;
+    const chorusDepth = context.createGain();
+    chorusDepth.gain.value = 0.0025;
+    source.connect(chorusSend);
+    chorusSend.connect(chorusDelay);
+    chorusDelay.connect(chorusWet);
+    chorusWet.connect(bus);
+    chorusLfo.connect(chorusDepth);
+    chorusDepth.connect(chorusDelay.delayTime);
+    chorusLfo.start();
+
+    const reverbSend = context.createGain();
+    reverbSend.gain.value = 0;
+    const reverb = context.createConvolver();
+    reverb.buffer = this.buildReverbImpulse(context);
+    const reverbWet = context.createGain();
+    reverbWet.gain.value = 0.7;
+    source.connect(reverbSend);
+    reverbSend.connect(reverb);
+    reverb.connect(reverbWet);
+    reverbWet.connect(bus);
+
+    return {
+      dry,
+      chorusSend,
+      chorusDelay,
+      chorusWet,
+      chorusLfo,
+      chorusDepth,
+      reverbSend,
+      reverb,
+      reverbWet,
+    };
+  }
+
+  private buildReverbImpulse(context: AudioContext): AudioBuffer {
+    const seconds = 2.2;
+    const length = Math.max(1, Math.floor(context.sampleRate * seconds));
+    const buffer = context.createBuffer(2, length, context.sampleRate);
+    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+      const data = buffer.getChannelData(channel);
+      for (let index = 0; index < data.length; index += 1) {
+        const decay = (1 - index / data.length) ** 2.6;
+        data[index] = (Math.random() * 2 - 1) * decay;
+      }
+    }
+    return buffer;
+  }
+
+  private startRegional(): void {
+    if (!this.regional.layer || this.regional.value === null || this.currentState !== "running") {
+      return;
+    }
+    if (this.regional.layer === "lightning") {
+      this.startRegionalLightning();
+      return;
+    }
+    this.ensureRegionalVoice();
+    this.applyRegionalPoint();
+  }
+
+  private applyRegionalPoint(): void {
+    const context = this.context;
+    const voice = this.regionalVoice;
+    const layer = this.regional.layer;
+    if (!context || !voice || !layer) return;
+    const instrument = OVERVIEW_INSTRUMENTS[layer];
+    const enrichment = REGIONAL_ENRICHMENT[layer];
+    const now = context.currentTime;
+    const value = this.regional.value;
+    const span = this.regional.max - this.regional.min;
+    const amount =
+      value === null ? 0 : span > 0 ? (value - this.regional.min) / span : 0.5;
+    const pitch =
+      pitchForValue(amount, instrument.scale, 0, 1) *
+      2 ** (instrument.detuneCents / 1200) *
+      2 ** instrument.octave;
+
+    voice.oscillators.forEach((oscillator) => {
+      oscillator.type = instrument.wave;
+    });
+    rampParameter(voice.oscillators[0]!.frequency, pitch, now, this.rampSeconds);
+    rampParameter(
+      voice.oscillators[1]!.frequency,
+      pitch * 2 ** (enrichment.detuneCents / 1200),
+      now,
+      this.rampSeconds,
+    );
+    rampParameter(
+      voice.oscillators[2]!.frequency,
+      pitch * 2 ** (enrichment.subOctave / 12),
+      now,
+      this.rampSeconds,
+    );
+    rampParameter(voice.oscillatorGains[0]!.gain, 1, now, this.rampSeconds);
+    rampParameter(voice.oscillatorGains[1]!.gain, 0.35, now, this.rampSeconds);
+    rampParameter(voice.oscillatorGains[2]!.gain, enrichment.subGain, now, this.rampSeconds);
+    rampParameter(voice.filter.frequency, instrument.filterHz, now, this.rampSeconds);
+    rampParameter(voice.filter.Q, instrument.filterQ, now, this.rampSeconds);
+    rampParameter(voice.panner.pan, positionToPan(this.regional.pan), now, this.rampSeconds);
+    rampParameter(voice.fx.chorusSend.gain, enrichment.chorusSend, now, this.rampSeconds);
+    rampParameter(voice.fx.reverbSend.gain, enrichment.reverbSend, now, this.rampSeconds);
+
+    this.configureRegionalSample(layer, voice);
+    if (voice.sampleGain) {
+      const sampleGain = value !== null && value > 0 ? enrichment.sample?.gain ?? 0 : 0;
+      rampParameter(voice.sampleGain.gain, sampleGain, now, Math.max(0.01, instrument.releaseSeconds));
+    }
+
+    const target = value !== null && value > 0 ? instrument.gain * REGIONAL_POINT_GAIN : 0;
+    const ramp =
+      target < voice.gain.gain.value ? instrument.releaseSeconds : instrument.attackSeconds;
+    rampParameter(voice.gain.gain, target, now, Math.max(0.01, ramp));
+  }
+
+  private configureRegionalSample(layer: LayerId, voice: RegionalVoice): void {
+    if (voice.sampleLayer === layer) return;
+    voice.sampleLayer = layer;
+    voice.sampleToken += 1;
+    const token = voice.sampleToken;
+    this.stopRegionalSample(voice);
+    const config = REGIONAL_ENRICHMENT[layer].sample;
+    if (!config) return;
+    void this.loadSceneBuffer(config.url).then((buffer) => {
+      if (this.regionalVoice !== voice || voice.sampleToken !== token || this.regional.layer !== layer) {
+        return;
+      }
+      const context = this.context;
+      if (!context) return;
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.loop = true;
+      const filter = context.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = config.filterHz;
+      filter.Q.value = config.filterQ;
+      const gain = context.createGain();
+      gain.gain.value = 0;
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(voice.panner);
+      source.start();
+      voice.sampleSource = source;
+      voice.sampleFilter = filter;
+      voice.sampleGain = gain;
+    }).catch((cause: unknown) => {
+      console.warn("Earth Jukebox: a regional texture sample could not be loaded.", cause);
+    });
+  }
+
+  private stopRegionalSample(voice: RegionalVoice): void {
+    if (voice.sampleSource) {
+      try {
+        voice.sampleSource.stop();
+      } catch {
+        // Already stopped.
+      }
+      voice.sampleSource.disconnect();
+      voice.sampleSource = null;
+    }
+    voice.sampleFilter?.disconnect();
+    voice.sampleFilter = null;
+    voice.sampleGain?.disconnect();
+    voice.sampleGain = null;
+  }
+
+  private fadeRegionalSample(target: number): void {
+    const voice = this.regionalVoice;
+    const context = this.context;
+    if (!voice?.sampleGain || !context) return;
+    rampParameter(voice.sampleGain.gain, target, context.currentTime, this.rampSeconds);
+  }
+
+  private startRegionalLightning(): void {
+    if (
+      this.currentState !== "running" ||
+      this.regional.layer !== "lightning" ||
+      this.regional.value === null
+    ) {
+      return;
+    }
+    if (this.regionalLightningTimer !== undefined) return;
+    this.playRegionalLightningNote();
+    this.scheduleRegionalLightning();
+  }
+
+  private scheduleRegionalLightning(): void {
+    if (
+      this.currentState !== "running" ||
+      this.regional.layer !== "lightning" ||
+      this.regional.value === null
+    ) {
+      return;
+    }
+    const bpm = lightningBpm(this.regional.value);
+    this.regionalLightningTimer = setTimeout(() => {
+      this.regionalLightningTimer = undefined;
+      this.playRegionalLightningNote();
+      this.scheduleRegionalLightning();
+    }, 60_000 / bpm);
+  }
+
+  private clearRegionalLightning(): void {
+    if (this.regionalLightningTimer !== undefined) {
+      clearTimeout(this.regionalLightningTimer);
+      this.regionalLightningTimer = undefined;
+    }
+    for (const hit of [...this.regionalLightningHits]) hit.stop();
+    this.regionalLightningHits.clear();
+  }
+
+  private playRegionalLightningNote(): void {
+    const context = this.context;
+    const graph = this.graph;
+    if (!context || !graph || this.currentState !== "running") return;
+    const layer = this.regional.layer;
+    const value = this.regional.value;
+    if (layer !== "lightning" || value === null) return;
+    const instrument = OVERVIEW_INSTRUMENTS.lightning;
+    const span = this.regional.max - this.regional.min;
+    const amount = span > 0 ? (value - this.regional.min) / span : 0.5;
+    const pitch =
+      pitchForValue(amount, instrument.scale, 0, 1) *
+      2 ** (instrument.detuneCents / 1200) *
+      2 ** instrument.octave;
+    const now = context.currentTime;
+    const oscillator = context.createOscillator();
+    oscillator.type = instrument.wave;
+    oscillator.frequency.setValueAtTime(pitch, now);
+    const filter = context.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(instrument.filterHz, now);
+    filter.Q.setValueAtTime(instrument.filterQ, now);
+    const gain = context.createGain();
+    const panner = context.createStereoPanner();
+    oscillator.connect(filter);
+    filter.connect(gain);
+    gain.connect(panner);
+    panner.connect(graph.bus);
+    panner.pan.setValueAtTime(positionToPan(this.regional.pan), now);
+    const level = instrument.gain * REGIONAL_POINT_GAIN;
+    const decay = Math.max(0.2, instrument.releaseSeconds);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(level, now + Math.max(0.002, instrument.attackSeconds));
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+    oscillator.start(now);
+    oscillator.stop(now + decay + 0.02);
+
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        oscillator.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      try {
+        filter.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      try {
+        gain.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      try {
+        panner.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      this.regionalLightningHits.delete(hit);
+    };
+    const hit: LightningHit = {
+      stop: () => {
+        try {
+          oscillator.stop();
+        } catch {
+          // Already stopped.
+        }
+        cleanup();
+      },
+    };
+    oscillator.onended = cleanup;
+    this.regionalLightningHits.add(hit);
+  }
+
+  private fadeRegional(target: number): void {
+    const context = this.context;
+    const voice = this.regionalVoice;
+    if (!context || !voice) return;
+    rampParameter(voice.gain.gain, target, context.currentTime, this.rampSeconds);
+  }
+
+  private clearTempoHits(): void {
+    for (const hit of [...this.tempoHits]) hit.stop();
+    this.tempoHits.clear();
+  }
+
   setMasterVolume(value: number): void {
     this.volume = clampUnit(value);
     if (this.currentState === "running" && this.context && this.graph) {
@@ -363,6 +995,7 @@ export class WebAudioSoundEngine implements SoundEngine {
     this.clearSuspendTimer();
     this.clearSettleTimers();
     this.clearLightning();
+    this.fadeOverview(0);
     this.stopSceneAudio();
     this.currentState = "idle";
     this.dataDuck = 1;
@@ -425,6 +1058,64 @@ export class WebAudioSoundEngine implements SoundEngine {
         node.disconnect();
       }
     }
+    const overview = this.overviewGraph;
+    if (overview) {
+      for (const column of overview.columns) {
+        for (const oscillator of column.oscillators) {
+          try {
+            oscillator.stop();
+          } catch {
+            // Already stopped.
+          }
+        }
+        for (const node of [...column.oscillators, ...column.gains, column.filter, column.panner]) {
+          node.disconnect();
+        }
+      }
+      overview.bus.disconnect();
+    }
+    if (this.regionalVoice) {
+      const voice = this.regionalVoice;
+      for (const oscillator of voice.oscillators) {
+        try {
+          oscillator.stop();
+        } catch {
+          // Already stopped.
+        }
+      }
+      try {
+        voice.fx.chorusLfo.stop();
+      } catch {
+        // Already stopped.
+      }
+      this.stopRegionalSample(voice);
+      for (const node of [
+        ...voice.oscillators,
+        ...voice.oscillatorGains,
+        voice.filter,
+        voice.gain,
+        voice.panner,
+        voice.fx.dry,
+        voice.fx.chorusSend,
+        voice.fx.chorusDelay,
+        voice.fx.chorusWet,
+        voice.fx.chorusLfo,
+        voice.fx.chorusDepth,
+        voice.fx.reverbSend,
+        voice.fx.reverb,
+        voice.fx.reverbWet,
+      ]) {
+        node.disconnect();
+      }
+      this.regionalVoice = undefined;
+    }
+    if (this.birdBus) {
+      this.birdBus.disconnect();
+      this.birdBus = undefined;
+    }
+    this.birdSample = null;
+    this.birdSampleLoad = null;
+    this.overviewGraph = undefined;
     this.graph = undefined;
     this.levelBuffer = undefined;
 
@@ -436,6 +1127,256 @@ export class WebAudioSoundEngine implements SoundEngine {
         void context.close();
       }
     }
+  }
+
+  private ensureOverviewGraph(): OverviewGraph | undefined {
+    const context = this.context;
+    const graph = this.graph;
+    if (!context || !graph) return undefined;
+    if (this.overviewGraph) return this.overviewGraph;
+    const bus = context.createGain();
+    bus.gain.value = 0;
+    bus.connect(graph.bus);
+    const columns: OverviewColumnVoice[] = [];
+    for (let index = 0; index < OVERVIEW_COLUMNS; index += 1) {
+      columns.push(this.buildOverviewColumn(context, bus));
+    }
+    this.overviewGraph = { columns, bus };
+    return this.overviewGraph;
+  }
+
+  private buildOverviewColumn(context: AudioContext, bus: GainNode): OverviewColumnVoice {
+    const filter = context.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 1600;
+    filter.Q.value = 0.9;
+    const panner = context.createStereoPanner();
+    filter.connect(panner);
+    panner.connect(bus);
+
+    const oscillators: OscillatorNode[] = [];
+    const gains: GainNode[] = [];
+    for (let row = 0; row < OVERVIEW_ROWS; row += 1) {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.value = OVERVIEW_BASE_HZ;
+      const rowGain = context.createGain();
+      rowGain.gain.value = 0;
+      oscillator.connect(rowGain);
+      rowGain.connect(filter);
+      oscillator.start();
+      oscillators.push(oscillator);
+      gains.push(rowGain);
+    }
+    return { oscillators, gains, filter, panner };
+  }
+
+  private applyOverviewInstrument(): void {
+    const graph = this.overviewGraph;
+    const layer = this.overview.layer;
+    const context = this.context;
+    if (!graph || !layer || !context) return;
+    const instrument = OVERVIEW_INSTRUMENTS[layer];
+    const now = context.currentTime;
+    for (const column of graph.columns) {
+      rampParameter(column.filter.frequency, instrument.filterHz, now, this.rampSeconds);
+      rampParameter(column.filter.Q, instrument.filterQ, now, this.rampSeconds);
+      for (const oscillator of column.oscillators) {
+        oscillator.type = instrument.wave;
+      }
+    }
+  }
+
+  private startOverview(): void {
+    if (
+      !this.overview.enabled ||
+      this.currentState !== "running" ||
+      !this.overview.layer ||
+      this.overview.columns.length === 0
+    ) {
+      this.fadeOverview(0);
+      return;
+    }
+    const graph = this.ensureOverviewGraph();
+    if (!graph) return;
+    this.fadeOverview(OVERVIEW_BUS_GAIN);
+    this.applyOverviewInstrument();
+    this.applyOverviewField();
+  }
+
+  private applyOverviewField(): void {
+    const context = this.context;
+    const graph = this.overviewGraph;
+    const layer = this.overview.layer;
+    if (!context || !graph || !layer) return;
+    const instrument = OVERVIEW_INSTRUMENTS[layer];
+    const activeCells = this.overview.columns.reduce(
+      (count, column) =>
+        count + (column?.cells.reduce((rows, cell) => rows + (cell.gain > 0 ? 1 : 0), 0) ?? 0),
+      0,
+    );
+    const gainScale = OVERVIEW_COLUMN_HEADROOM / Math.sqrt(Math.max(1, activeCells));
+    const detune = 2 ** (instrument.detuneCents / 1200);
+    const now = context.currentTime;
+
+    for (let index = 0; index < OVERVIEW_COLUMNS; index += 1) {
+      const voice = graph.columns[index]!;
+      const column = this.overview.columns[index];
+      rampParameter(voice.panner.pan, column?.pan ?? 0, now, this.rampSeconds);
+      for (let row = 0; row < OVERVIEW_ROWS; row += 1) {
+        const cell = column?.cells[row];
+        const pitch = cell && Number.isFinite(cell.pitchHz) ? cell.pitchHz : OVERVIEW_BASE_HZ;
+        const gain = cell
+          ? clampUnit(cell.gain) * instrument.gain * gainScale * OVERVIEW_LAYER_GAIN
+          : 0;
+        const rowGain = voice.gains[row]!;
+        const rampSeconds =
+          gain < rowGain.gain.value ? instrument.releaseSeconds : instrument.attackSeconds;
+        rampParameter(voice.oscillators[row]!.frequency, pitch * detune * 2 ** instrument.octave, now, this.rampSeconds);
+        rampParameter(rowGain.gain, gain, now, Math.max(0.01, rampSeconds));
+      }
+    }
+  }
+
+  private fadeOverview(target: number): void {
+    const graph = this.overviewGraph;
+    const context = this.context;
+    if (!graph || !context) return;
+    rampParameter(graph.bus.gain, target, context.currentTime, this.rampSeconds);
+  }
+
+  private ensureBirdBus(): GainNode | undefined {
+    const context = this.context;
+    const graph = this.graph;
+    if (!context || !graph) return undefined;
+    if (this.birdBus) return this.birdBus;
+    const bus = context.createGain();
+    bus.gain.value = 0;
+    bus.connect(graph.bus);
+    this.birdBus = bus;
+    return bus;
+  }
+
+  private startForestBirds(): void {
+    if (!this.forestBirdsEnabled || this.currentState !== "running") return;
+    const bus = this.ensureBirdBus();
+    if (!bus) return;
+    rampParameter(bus.gain, BIRD_BUS_GAIN, this.context!.currentTime, this.rampSeconds);
+    if (this.birdStarted || this.birdTimer !== undefined) return;
+    this.birdStarted = true;
+    void this.loadBirdSample().then((sample) => {
+      this.birdStarted = false;
+      if (!sample || !this.forestBirdsEnabled || this.currentState !== "running") return;
+      this.birdSample = sample;
+      this.scheduleForestBird(this.randomBetween(BIRD_FIRST_DELAY_MIN_SECONDS, BIRD_FIRST_DELAY_MAX_SECONDS));
+    });
+  }
+
+  private stopForestBirds(): void {
+    this.birdStarted = false;
+    if (this.birdTimer !== undefined) {
+      clearTimeout(this.birdTimer);
+      this.birdTimer = undefined;
+    }
+    for (const hit of [...this.birdHits]) hit.stop();
+    this.birdHits.clear();
+    const context = this.context;
+    if (this.birdBus && context) {
+      rampParameter(this.birdBus.gain, 0, context.currentTime, this.rampSeconds);
+    }
+  }
+
+  private async loadBirdSample(): Promise<AudioBuffer | null> {
+    if (this.birdSample) return this.birdSample;
+    if (!this.birdSampleUrl) return null;
+    if (!this.birdSampleLoad) {
+      const context = this.context;
+      if (!context) return null;
+      this.birdSampleLoad = this.loadSceneBuffer(this.birdSampleUrl)
+        .catch((cause: unknown) => {
+          console.warn("Earth Jukebox: the forest bird sample could not be loaded; keeping only the synth.", cause);
+          return null;
+        });
+    }
+    return this.birdSampleLoad;
+  }
+
+  private randomBetween(min: number, max: number): number {
+    return min + this.random() * (max - min);
+  }
+
+  private scheduleForestBird(delaySeconds: number): void {
+    if (!this.forestBirdsEnabled || this.currentState !== "running" || !this.birdSample) return;
+    this.birdTimer = setTimeout(() => {
+      this.birdTimer = undefined;
+      if (!this.forestBirdsEnabled || this.currentState !== "running") return;
+      this.playForestBird();
+      this.scheduleForestBird(this.randomBetween(BIRD_GAP_MIN_SECONDS, BIRD_GAP_MAX_SECONDS));
+    }, Math.max(100, delaySeconds * 1000));
+  }
+
+  private playForestBird(): void {
+    const context = this.context;
+    const sample = this.birdSample;
+    const bus = this.birdBus;
+    if (!context || !sample || !bus || this.currentState !== "running") return;
+    const now = context.currentTime;
+    const duration = Math.max(0.1, Math.min(BIRD_EXCERPT_MAX_SECONDS, sample.duration));
+    const excerpt = Math.min(
+      duration,
+      this.randomBetween(BIRD_EXCERPT_MIN_SECONDS, BIRD_EXCERPT_MAX_SECONDS),
+    );
+    const offset = this.random() * Math.max(0, duration - excerpt - 0.05);
+    const source = context.createBufferSource();
+    source.buffer = sample;
+    const gain = context.createGain();
+    const panner = context.createStereoPanner();
+    source.connect(gain);
+    gain.connect(panner);
+    panner.connect(bus);
+    rampParameter(panner.pan, (this.random() * 2 - 1) * 0.65, now, this.rampSeconds);
+    const level = BIRD_GAIN * (0.65 + this.random() * 0.35);
+    const fadeStart = Math.max(BIRD_ATTACK_SECONDS, excerpt - BIRD_FADE_SECONDS);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(level, now + BIRD_ATTACK_SECONDS);
+    gain.gain.setValueAtTime(level, now + fadeStart);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + excerpt);
+    source.start(now, offset, excerpt);
+    source.stop(now + excerpt + 0.02);
+
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        source.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      try {
+        gain.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      try {
+        panner.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      this.birdHits.delete(hit);
+    };
+    const hit: LightningHit = {
+      stop: () => {
+        try {
+          source.stop();
+        } catch {
+          // Already stopped.
+        }
+        cleanup();
+      },
+    };
+    source.onended = cleanup;
+    this.birdHits.add(hit);
   }
 
   private applyLayer(layer: LayerId, snap: boolean): void {

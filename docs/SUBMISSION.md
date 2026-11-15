@@ -41,12 +41,13 @@ TODO: confirm against the final app.
 
 - A 3D planet with four NASA layers: forest height (GEDI), wildfire smoke
   (MERRA-2), carbon dioxide (OCO-2 GEOS) and lightning (LIS on the ISS).
-- Each layer sounds in real time where the cursor is. The layers never mix:
-  only the layer picked in the layer picker is heard.
+- In the planet view each layer sounds over the visible globe; in the regional
+  map it follows the selected point. The layers never mix: only the layer
+  picked in the layer picker is heard.
 - A short welcome tour explains the controls the first time the app opens.
 - Focusing on the Amazon turns the planet and flattens it into a regional map.
-- A timeline under the planet that plays while the planet turns (one turn is
-  a day of smoke, 30 days of CO2 or a year of lightning, 4× or 8×); a story
+- A timeline under the planet with its own clock and a pause button (one turn
+  is a day of smoke, 30 days of CO2 or a year of lightning, 4× or 8×); a story
   mode walks through the three ideas in under a minute.
 - Keyboard-only use and screen-reader descriptions (layer, place, low / medium
   / high value).

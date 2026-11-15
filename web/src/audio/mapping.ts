@@ -5,13 +5,15 @@
 // that range and anything that is not a number counts as 0.
 
 /** Semitone offsets of the major pentatonic scale: five notes that always sound consonant together. */
-export const PENTATONIC_SEMITONES = [0, 2, 4, 7, 9] as const;
+export const MAJOR_PENTATONIC_SEMITONES = [0, 2, 4, 7, 9] as const;
+export const MINOR_PENTATONIC_SEMITONES = [0, 3, 5, 7, 10] as const;
+export const SUSPENDED_PENTATONIC_SEMITONES = [0, 2, 5, 7, 10] as const;
 
 /** Lowest forest note: C3. */
 export const FOREST_BASE_HZ = 130.81;
 
 /** The forest voice spans two octaves of the scale plus the top octave note: 11 steps. */
-export const FOREST_SCALE_STEPS = PENTATONIC_SEMITONES.length * 2 + 1;
+export const FOREST_SCALE_STEPS = MAJOR_PENTATONIC_SEMITONES.length * 2 + 1;
 
 export function clampUnit(value: number): number {
   if (Number.isNaN(value)) return 0;
@@ -21,9 +23,9 @@ export function clampUnit(value: number): number {
 /** Frequency of a step of the pentatonic scale above `FOREST_BASE_HZ` (step 0 = base note). */
 export function scaleStepToFrequency(step: number): number {
   const safeStep = Math.max(0, Math.round(step));
-  const notes = PENTATONIC_SEMITONES.length;
+  const notes = MAJOR_PENTATONIC_SEMITONES.length;
   const octave = Math.floor(safeStep / notes);
-  const semitone = PENTATONIC_SEMITONES[safeStep % notes] ?? 0;
+  const semitone = MAJOR_PENTATONIC_SEMITONES[safeStep % notes] ?? 0;
   return FOREST_BASE_HZ * 2 ** ((octave * 12 + semitone) / 12);
 }
 
@@ -67,7 +69,9 @@ export function smokeToTimbre(value: number): SmokeTimbre {
     roughness: amount,
     roughnessRateHz: 18 + 42 * amount,
     // Exponential sweep so equal steps of smoke sound like equal steps of darkness.
-    filterCutoffHz: SMOKE_FILTER_OPEN_HZ * (SMOKE_FILTER_CLOSED_HZ / SMOKE_FILTER_OPEN_HZ) ** amount,
+    filterCutoffHz:
+      SMOKE_FILTER_OPEN_HZ *
+      (SMOKE_FILTER_CLOSED_HZ / SMOKE_FILTER_OPEN_HZ) ** amount,
     noiseMix: 0.15 + 0.6 * amount,
   };
 }
@@ -139,7 +143,9 @@ export function lightningToPercussion(value: number): LightningPercussion {
   const amount = clampUnit(value);
   return {
     rateHz: LIGHTNING_MAX_HITS_PER_SECOND * amount,
-    pitchHz: LIGHTNING_MIN_PITCH_HZ + (LIGHTNING_MAX_PITCH_HZ - LIGHTNING_MIN_PITCH_HZ) * amount,
+    pitchHz:
+      LIGHTNING_MIN_PITCH_HZ +
+      (LIGHTNING_MAX_PITCH_HZ - LIGHTNING_MIN_PITCH_HZ) * amount,
     decaySeconds: 0.16 + 0.12 * amount,
   };
 }

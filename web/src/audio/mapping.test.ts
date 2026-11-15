@@ -4,7 +4,7 @@ import {
   BREATH_SLOW_HZ,
   FOREST_BASE_HZ,
   MIN_ACTIVE_GAIN,
-  PENTATONIC_SEMITONES,
+  MAJOR_PENTATONIC_SEMITONES,
   SMOKE_FILTER_CLOSED_HZ,
   SMOKE_FILTER_OPEN_HZ,
   co2ToBreath,
@@ -23,7 +23,10 @@ function pitchClass(frequency: number): number {
 
 function isOnScale(frequency: number): boolean {
   const pitch = pitchClass(frequency);
-  return PENTATONIC_SEMITONES.some((note) => Math.abs(pitch - note) < 1e-6 || Math.abs(pitch - 12 - note) < 1e-6);
+  return MAJOR_PENTATONIC_SEMITONES.some(
+    (note) =>
+      Math.abs(pitch - note) < 1e-6 || Math.abs(pitch - 12 - note) < 1e-6,
+  );
 }
 
 describe("mapping", () => {
@@ -31,8 +34,13 @@ describe("mapping", () => {
     let previous = 0;
     for (let index = 0; index <= 100; index += 1) {
       const voice = forestToVoice(index / 100);
-      expect(isOnScale(voice.frequency), `note for value ${index / 100}`).toBe(true);
-      expect(isOnScale(voice.harmonyFrequency), `harmony for value ${index / 100}`).toBe(true);
+      expect(isOnScale(voice.frequency), `note for value ${index / 100}`).toBe(
+        true,
+      );
+      expect(
+        isOnScale(voice.harmonyFrequency),
+        `harmony for value ${index / 100}`,
+      ).toBe(true);
       // Taller forest never sounds lower.
       expect(voice.frequency).toBeGreaterThanOrEqual(previous);
       previous = voice.frequency;
@@ -53,8 +61,14 @@ describe("mapping", () => {
     const smoky = smokeToTimbre(0.9);
     expect(smoky.roughness).toBeGreaterThan(clear.roughness);
     expect(smoky.filterCutoffHz).toBeLessThan(clear.filterCutoffHz);
-    expect(smokeToTimbre(0).filterCutoffHz).toBeCloseTo(SMOKE_FILTER_OPEN_HZ, 6);
-    expect(smokeToTimbre(1).filterCutoffHz).toBeCloseTo(SMOKE_FILTER_CLOSED_HZ, 6);
+    expect(smokeToTimbre(0).filterCutoffHz).toBeCloseTo(
+      SMOKE_FILTER_OPEN_HZ,
+      6,
+    );
+    expect(smokeToTimbre(1).filterCutoffHz).toBeCloseTo(
+      SMOKE_FILTER_CLOSED_HZ,
+      6,
+    );
   });
 
   it("limits values outside 0..1 instead of producing wild sounds", () => {

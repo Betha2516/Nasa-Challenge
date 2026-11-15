@@ -54,6 +54,7 @@ import {
 } from "three";
 import type { BoundingBox } from "../data/types";
 import type { SceneDefinition } from "../scenes/types";
+import { OVERVIEW_COLUMNS, OVERVIEW_ROWS, type VisibleCell, type VisibleColumn, type VisibleField } from "../audio/overview";
 import { LocationMarkers } from "./LocationMarkers";
 import { SceneMarkers } from "./SceneMarkers";
 import type { ViewMode, ViewState } from "./FocusTransition";
@@ -136,12 +137,6 @@ export interface EarthMeshProps {
   /** The "Auto-rotate" switch: the planet turns by itself on the planet view. */
   autoRotate: boolean;
   /**
-   * Called on every frame the planet turns by itself (never for a drag), with the
-   * angle turned in radians. The timeline plays from it, so it moves exactly
-   * while, and as fast as, the planet turns.
-   */
-  onSpin?: (radians: number) => void;
-  /**
    * How far the timeline is from the instant in `layerTextures.global/region`
    * towards the one in `globalNext/regionNext` (0..1). Read on every frame, so
    * the picture fades smoothly without React re-rendering.
@@ -177,6 +172,8 @@ export interface EarthMeshProps {
   onGlobeTap: (lon: number, lat: number) => void;
   /** Touch screens: a tap on the map of a region. */
   onMapTap: () => void;
+  /** Visible screen field for the overview scan; null when the globe is not visible. */
+  onOverviewField?: (field: VisibleField | null) => void;
 }
 
 export interface ReliefImages {
@@ -522,7 +519,6 @@ export function EarthMesh({
   segments,
   raiseRelief,
   autoRotate,
-  onSpin,
   frameMix,
   reliefImages,
   dotImage,
@@ -537,13 +533,17 @@ export function EarthMesh({
   onMapBack,
   onGlobeTap,
   onMapTap,
+  onOverviewField,
 }: EarthMeshProps) {
   const gl = useThree((state) => state.gl);
   const pickGroup = useRef<Group>(null);
   const sphereMesh = useRef<Mesh>(null);
   const planeMesh = useRef<Mesh>(null);
   const dragRef = useRef<{ x: number; y: number; yaw: number; pitch: number } | null>(null);
+  const planeDown = useRef<{ x: number; y: number } | null>(null);
   const clickTimer = useRef<number | null>(null);
+  const overviewSince = useRef(0);
+  const overviewNdc = useMemo(() => new Vector2(), []);
   // Where the cursor rests over the canvas, so the point under it can be found
   // again while the planet turns or a transition ends beneath a still cursor.
   const pointerRef = useRef<{ inside: boolean; clientX: number; touch: boolean }>({ inside: false, clientX: 0, touch: false });
@@ -702,6 +702,7 @@ export function EarthMesh({
     };
     const end = () => {
       dragRef.current = null;
+      planeDown.current = null;
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -732,14 +733,12 @@ export function EarthMesh({
   const rotation = useMemo(() => new Matrix4(), []);
   useFrame((_, delta) => {
     const state = view.current;
-    const before = state.yaw;
     state.yaw = spinStep(state.yaw, delta, {
       spinning: state.spinning,
       autoRotate,
       mode,
       dragging: dragRef.current !== null,
     });
-    if (state.yaw !== before) onSpin?.(state.yaw - before);
     uniforms.uFrameMix.value = frameMix?.current ?? 0;
     euler.set(state.pitch, state.yaw, 0);
     rotation.makeRotationFromEuler(euler);
@@ -789,6 +788,54 @@ export function EarthMesh({
     emit({ ...planeUvToLonLat(uvX, 1 - uvY), clientX, touch: pointerRef.current.touch });
   };
 
+  // Sample a small screen grid over the visible globe or region map. It uses
+  // screen space, so the column on the right is the column heard on the right,
+  // and raycasting naturally leaves out the part of the grid off the surface.
+  useFrame((state, delta) => {
+    if (!onOverviewField) return;
+    const globe = mode === "globe";
+    const map = mode === "map";
+    if (!globe && !map) {
+      overviewSince.current = 0;
+      return;
+    }
+    overviewSince.current += delta;
+    if (overviewSince.current < 0.1) return;
+    overviewSince.current = 0;
+    const sphere = globe ? sphereMesh.current : null;
+    const plane = map ? planeMesh.current : null;
+    const target = sphere ?? plane;
+    if (!target) return;
+    target.updateMatrixWorld(true);
+    pickGroup.current?.updateMatrixWorld(true);
+
+    const columns: VisibleColumn[] = [];
+    for (let column = 0; column < OVERVIEW_COLUMNS; column += 1) {
+      const screenX = (column + 0.5) / OVERVIEW_COLUMNS;
+      const cells: (VisibleCell | null)[] = [];
+      for (let row = 0; row < OVERVIEW_ROWS; row += 1) {
+        const screenY = (row + 0.5) / OVERVIEW_ROWS;
+        overviewNdc.set(screenX * 2 - 1, 1 - screenY * 2);
+        state.raycaster.setFromCamera(overviewNdc, state.camera);
+        const hit = state.raycaster.intersectObject(target, false)[0];
+        const point = sphere
+          ? hit
+            ? sphereLonLat(hit.point)
+            : null
+          : hit?.uv
+            ? planeUvToLonLat(hit.uv.x, 1 - hit.uv.y)
+            : null;
+        cells.push(point ? { lon: point.lon, lat: point.lat, screenX, screenY } : null);
+      }
+      columns.push({ screenX, cells });
+    }
+    onOverviewField(columns);
+  });
+
+  useEffect(() => {
+    if (mode !== "globe" && mode !== "map") onOverviewField?.(null);
+  }, [mode, onOverviewField]);
+
   // Browsers only send pointer events when the mouse moves. While the planet
   // turns, or when a transition ends under a still cursor, look the point up
   // again a few times a second so the sound follows what is under the cursor.
@@ -816,17 +863,6 @@ export function EarthMesh({
     }
   });
 
-  const handleSphereMove = (event: ThreeEvent<PointerEvent>) => {
-    reportSphere(event.point, event.nativeEvent.clientX);
-  };
-
-  const handleSphereDown = (event: ThreeEvent<PointerEvent>) => {
-    event.stopPropagation();
-    lastPressTouch.current = event.nativeEvent.pointerType === "touch";
-    const state = view.current;
-    dragRef.current = { x: event.nativeEvent.clientX, y: event.nativeEvent.clientY, yaw: state.yaw, pitch: state.pitch };
-  };
-
   const clearClickTimer = () => {
     if (clickTimer.current !== null) {
       window.clearTimeout(clickTimer.current);
@@ -836,75 +872,80 @@ export function EarthMesh({
 
   useEffect(() => clearClickTimer, []);
 
+  const handleSphereMove = (event: ThreeEvent<PointerEvent>) => {
+    reportSphere(event.point, event.nativeEvent.clientX);
+  };
+
+  const handleSphereDown = (event: ThreeEvent<PointerEvent>) => {
+    event.stopPropagation();
+    clearClickTimer();
+    lastPressTouch.current = event.nativeEvent.pointerType === "touch";
+    // The general view rotates the planet; selecting a listening point belongs
+    // to the region map, so a drag here never scrubs a point.
+    const state = view.current;
+    dragRef.current = { x: event.nativeEvent.clientX, y: event.nativeEvent.clientY, yaw: state.yaw, pitch: state.pitch };
+  };
+
   const handleSphereDoubleClick = (event: ThreeEvent<MouseEvent>) => {
     clearClickTimer();
     if (lastPressTouch.current || event.delta > CLICK_TOLERANCE_PX) return;
     const point = sphereLonLat(event.point);
-    if (point) onGlobeSelectPoint(point.lon, point.lat, event.nativeEvent.clientX);
+    if (point) onGlobeFocusRegion(point.lon, point.lat);
   };
 
   const handleSphereClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.delta > CLICK_TOLERANCE_PX) return;
+    // Touch screens keep the region flow: one tap chooses, the next visits.
+    if (!lastPressTouch.current) return;
     const point = sphereLonLat(event.point);
-    if (!point) return;
-    // Touch screens have their own tap flow: keep selecting the sound point on a
-    // tap while the region flow (tap to choose, tap again to fly) stays as it is.
-    if (lastPressTouch.current) {
-      onGlobeSelectPoint(point.lon, point.lat, event.nativeEvent.clientX);
-      onGlobeTap(point.lon, point.lat);
-      return;
-    }
-    // Wait: a second click cancels this timer and selects the point instead.
-    if (event.nativeEvent.detail > 1) {
-      clearClickTimer();
-      return;
-    }
-    clearClickTimer();
-    clickTimer.current = window.setTimeout(() => {
-      clickTimer.current = null;
-      onGlobeFocusRegion(point.lon, point.lat);
-    }, SINGLE_CLICK_MS);
+    if (point) onGlobeTap(point.lon, point.lat);
   };
 
   const handlePlaneDown = (event: ThreeEvent<PointerEvent>) => {
+    clearClickTimer();
     lastPressTouch.current = event.nativeEvent.pointerType === "touch";
+    planeDown.current = { x: event.nativeEvent.clientX, y: event.nativeEvent.clientY };
   };
 
   const handlePlaneClick = (event: ThreeEvent<MouseEvent>) => {
     if (event.delta > CLICK_TOLERANCE_PX) return;
+    if (!event.uv) return;
+    const point = planeUvToLonLat(event.uv.x, 1 - event.uv.y);
+    const clientX = event.nativeEvent.clientX;
     // Touch screens keep their double-tap flow; a tap still selects the point.
     if (lastPressTouch.current) {
-      if (event.uv) {
-        const point = planeUvToLonLat(event.uv.x, 1 - event.uv.y);
-        onGlobeSelectPoint(point.lon, point.lat, event.nativeEvent.clientX);
-      }
+      onGlobeSelectPoint(point.lon, point.lat, clientX);
       onMapTap();
       return;
     }
-    // Wait: a second click cancels this timer and selects the point instead.
+    // Wait: a second click cancels this timer and returns to the planet instead.
     if (event.nativeEvent.detail > 1) {
       clearClickTimer();
       return;
     }
     clearClickTimer();
+    const { lon, lat } = point;
     clickTimer.current = window.setTimeout(() => {
       clickTimer.current = null;
-      onMapBack();
+      onGlobeSelectPoint(lon, lat, clientX);
     }, SINGLE_CLICK_MS);
   };
 
   const handlePlaneMove = (event: ThreeEvent<PointerEvent>) => {
     if (!event.uv) return;
-    reportPlane(event.uv.x, event.uv.y, event.nativeEvent.clientX);
+    const clientX = event.nativeEvent.clientX;
+    reportPlane(event.uv.x, event.uv.y, clientX);
+    const down = planeDown.current;
+    if (!down) return;
+    if (Math.hypot(clientX - down.x, event.nativeEvent.clientY - down.y) <= CLICK_TOLERANCE_PX) return;
+    const point = planeUvToLonLat(event.uv.x, 1 - event.uv.y);
+    onGlobeSelectPoint(point.lon, point.lat, clientX);
   };
 
   const handlePlaneDoubleClick = (event: ThreeEvent<MouseEvent>) => {
     clearClickTimer();
     if (lastPressTouch.current || event.delta > CLICK_TOLERANCE_PX) return;
-    if (event.uv) {
-      const point = planeUvToLonLat(event.uv.x, 1 - event.uv.y);
-      onGlobeSelectPoint(point.lon, point.lat, event.nativeEvent.clientX);
-    }
+    onMapBack();
   };
 
   const handleOut = () => {
@@ -947,7 +988,7 @@ export function EarthMesh({
             <planeGeometry args={[PLANE_WIDTH, PLANE_HEIGHT]} />
             <meshBasicMaterial transparent opacity={0} depthWrite={false} />
           </mesh>
-          <LocationMarkers mode="map" bbox={bbox} selectedPoint={selectedPoint} hoverPoint={hoverPoint} />
+          <LocationMarkers mode="map" bbox={focusBbox} selectedPoint={selectedPoint} hoverPoint={hoverPoint} />
           {scenes && scenes.length > 0 && onSceneSelect && (
             <SceneMarkers
               scenes={scenes}

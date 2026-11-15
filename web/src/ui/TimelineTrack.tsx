@@ -1,8 +1,9 @@
 // The timeline line under the planet. One mark per instant of the picked layer,
 // placed by its real time (an hour of smoke, a month of lightning), with the day
 // or year written under the marks that start one. The playhead shows the instant
-// on screen and heard; it moves by itself while the planet turns and stays put
-// when it stops (Auto-rotate off, a drag, the map view).
+// on screen and heard; it moves by itself at the pace of the planet's turn and
+// keeps going on the map view, during a drag and with Auto-rotate off. Only the
+// pause button stops it.
 //
 // The person can drag along the line or click it to pick a moment; the planet
 // keeps turning and the timeline goes on from there. Arrow keys move one instant,
@@ -33,8 +34,9 @@ export interface TimelineTrackProps {
   /** The picked layer; a static one draws the dimmed line. */
   layer: LoadedLayer;
   position: number;
-  /** True while the planet turns by itself, so the timeline is playing. */
+  /** True while the timeline plays; only the person pauses it. */
   playing: boolean;
+  onTogglePlay: () => void;
   onSeek: (position: number) => void;
   /** Timeline speed: how many times the normal real time one turn covers. */
   speed: number;
@@ -45,7 +47,7 @@ export interface TimelineTrackProps {
 const panel = "pointer-events-auto rounded bg-slate-950/70 px-4 py-2 text-sm text-slate-100 backdrop-blur-sm";
 
 export function TimelineTrack(props: TimelineTrackProps) {
-  const { layer, position, playing, onSeek, speed, onSpeed, className = "" } = props;
+  const { layer, position, playing, onTogglePlay, onSeek, speed, onSpeed, className = "" } = props;
   const { manifest } = layer;
   const timed = isTimed(layer);
   const frames = manifest.dates.length;
@@ -101,9 +103,22 @@ export function TimelineTrack(props: TimelineTrackProps) {
         <span data-testid={`timeline-date-${manifest.id}`} className="font-mono text-slate-100">
           {date}
         </span>
-        <span data-testid="timeline-playing" className="text-slate-400">
-          {!timed ? "fixed layer" : playing ? "▶ turning with the planet" : "❚❚ paused"}
-        </span>
+        {timed ? (
+          <button
+            type="button"
+            data-testid="timeline-play"
+            aria-pressed={!playing}
+            aria-label={playing ? "Pause the timeline" : "Play the timeline"}
+            className="rounded bg-slate-800 px-2 py-0.5 text-slate-300 hover:bg-slate-700"
+            onClick={onTogglePlay}
+          >
+            {playing ? "❚❚ Pause" : "▶ Play"}
+          </button>
+        ) : (
+          <span data-testid="timeline-playing" className="text-slate-400">
+            fixed layer
+          </span>
+        )}
       </div>
 
       {timed && (

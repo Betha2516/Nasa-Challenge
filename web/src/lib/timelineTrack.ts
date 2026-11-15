@@ -3,14 +3,16 @@
 // moves when the planet turns. Pure, so it is tested without React.
 //
 // Decisions (docs/TIMELINE-HANDOFF.md):
-// - The timeline plays only while the planet turns by itself. One turn covers a
-//   fixed stretch of real time per cadence: one day for hourly data (smoke), 30
-//   days for daily data (CO2), one year for monthly data (lightning). Smoke turns
-//   with the planet like the real Earth.
+// - The timeline plays on its own clock, at the pace of the planet's turn, and
+//   only the person pauses it: a zoom into a region, a drag or Auto-rotate off
+//   do not stop it. One turn's time covers a fixed stretch of real time per
+//   cadence: one day for hourly data (smoke), 30 days for daily data (CO2), one
+//   year for monthly data (lightning).
 // - Marks are placed by each instant's real time, so a gap in the data shows as
 //   a gap on the line. Layers without times (sample data) are evenly spaced.
 
 import type { Cadence, LayerManifest } from "../data/types";
+import { SPIN_SPEED } from "../scene/spin";
 import { clampPosition } from "./timeline";
 
 type Timed = Pick<LayerManifest, "dates" | "times" | "cadence">;
@@ -27,6 +29,18 @@ export function framesPerTurn(cadence: Cadence | undefined, frames: number): num
     case "month":
       return 12 / cadence.count;
   }
+}
+
+/** Seconds one turn of the planet takes; the timeline keeps this pace even when the planet stops. */
+export const SECONDS_PER_TURN = (2 * Math.PI) / SPIN_SPEED;
+
+/** Longest clock step counted, so a tab that was in the background does not jump the timeline. */
+const MAX_PLAY_STEP_S = 0.1;
+
+/** How much of the timeline `seconds` of playing moves (before the speed), given `perTurn` from positionPerTurn. */
+export function playDelta(seconds: number, perTurn: number): number {
+  if (!Number.isFinite(seconds) || seconds <= 0 || !Number.isFinite(perTurn)) return 0;
+  return (Math.min(seconds, MAX_PLAY_STEP_S) / SECONDS_PER_TURN) * perTurn;
 }
 
 /** How much of the 0..1 timeline one full turn of the planet moves; 0 for a layer with one instant. */
@@ -200,7 +214,7 @@ export function turnText(cadence: Cadence | undefined, speed: number): string {
 }
 
 /**
- * Collects the turn of the planet frame by frame and hands it on at most once
+ * Collects the timeline's movement frame by frame and hands it on at most once
  * every `intervalMs`, so the timeline state (and what reads it) changes about 30
  * times a second, not on every animation frame.
  */

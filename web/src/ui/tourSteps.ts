@@ -44,7 +44,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     testId: "planet-canvas",
     title: "Explore the planet",
     description:
-      "Drag to turn it. The sound follows the place under the cursor, from the left speaker to the right one.",
+      "The overview plays the visible planet all at once: low notes near the poles, high notes near the equator. Drag to turn it; double-click a region to fly there.",
   },
   {
     testId: "planet-hud-amazon-button",
