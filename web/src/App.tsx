@@ -28,6 +28,7 @@ import { TIMELINE_UPDATE_HZ, TimelineProvider, useTimeline, useTimelineActions }
 import { PlanetHud } from "./ui/PlanetHud";
 import { ScenePopup } from "./ui/ScenePopup";
 import { ZoneInProgressPopup } from "./ui/ZoneInProgressPopup";
+import { zoneNoticeRegion } from "./ui/zoneNotice";
 import { EARTH_VIEW_ID, layerForChoice } from "./ui/layerChoice";
 import { layerVoices } from "./ui/soloLayer";
 import { TimelineTrack } from "./ui/TimelineTrack";
@@ -179,7 +180,7 @@ function PlanetView({
   // region finishes, a notice says its zone is in progress.
   const [zoneNoticeRegionId, setZoneNoticeRegionId] = useState<string | null>(null);
   useEffect(() => {
-    setZoneNoticeRegionId(mode === "map" && focusRegionId !== AMAZON_REGION_ID ? focusRegionId : null);
+    setZoneNoticeRegionId(zoneNoticeRegion(mode, focusRegionId));
   }, [mode, focusRegionId]);
   const closeZoneNotice = useCallback(() => setZoneNoticeRegionId(null), []);
   // Every way back to the planet (the button, a double-click or double-tap on the
