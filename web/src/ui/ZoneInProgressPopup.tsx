@@ -1,7 +1,8 @@
 // Notice shown after flying to a region that has no zones of interest yet (every
 // region but the Amazon): a small centred card saying the zone is in progress.
-// It closes with its button, a click outside the card or Escape, and gives the
-// keyboard focus back to where it was.
+// It closes with its button, a click outside the card or Escape, keeps Tab on
+// its button while open (it is modal), and gives the keyboard focus back to
+// where it was.
 
 import { useEffect, useRef } from "react";
 
@@ -23,6 +24,12 @@ export function ZoneInProgressPopup({ regionName, onClose }: ZoneInProgressPopup
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") onClose();
+      // The notice is modal: OK is its only control, so Tab stays on it instead
+      // of reaching the HUD behind.
+      if (event.key === "Tab") {
+        event.preventDefault();
+        closeRef.current?.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
