@@ -1,6 +1,7 @@
 // Notice shown after flying to a region that has no zones of interest yet (every
 // region but the Amazon): a small centred card saying the zone is in progress.
-// It closes with its button, a click outside the card or Escape.
+// It closes with its button, a click outside the card or Escape, and gives the
+// keyboard focus back to where it was.
 
 import { useEffect, useRef } from "react";
 
@@ -13,7 +14,10 @@ export function ZoneInProgressPopup({ regionName, onClose }: ZoneInProgressPopup
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    // Give the keyboard focus back to where it was once the notice closes.
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     closeRef.current?.focus();
+    return () => previous?.focus();
   }, []);
 
   useEffect(() => {
@@ -37,7 +41,7 @@ export function ZoneInProgressPopup({ regionName, onClose }: ZoneInProgressPopup
         onClick={(event) => event.stopPropagation()}
         className="w-full max-w-sm rounded-xl bg-slate-950/90 p-5 text-center text-slate-100 shadow-2xl backdrop-blur"
       >
-        <p className="text-xs uppercase tracking-wide text-slate-400">{regionName}</p>
+        {regionName && <p className="text-xs uppercase tracking-wide text-slate-400">{regionName}</p>}
         <h2 id="zone-in-progress-title" className="mt-1 text-lg font-semibold">
           This zone is in progress
         </h2>
