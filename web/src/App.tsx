@@ -27,6 +27,7 @@ import {
 import { TIMELINE_UPDATE_HZ, TimelineProvider, useTimeline, useTimelineActions } from "./timeline/TimelineProvider";
 import { PlanetHud } from "./ui/PlanetHud";
 import { ScenePopup } from "./ui/ScenePopup";
+import { ZoneInProgressPopup } from "./ui/ZoneInProgressPopup";
 import { EARTH_VIEW_ID, layerForChoice } from "./ui/layerChoice";
 import { layerVoices } from "./ui/soloLayer";
 import { TimelineTrack } from "./ui/TimelineTrack";
@@ -174,6 +175,13 @@ function PlanetView({
   useEffect(() => {
     if (targetView !== "map") setSceneHover(null);
   }, [targetView]);
+  // Only the Amazon has zones of interest so far: once the zoom into any other
+  // region finishes, a notice says its zone is in progress.
+  const [zoneNoticeRegionId, setZoneNoticeRegionId] = useState<string | null>(null);
+  useEffect(() => {
+    setZoneNoticeRegionId(mode === "map" && focusRegionId !== AMAZON_REGION_ID ? focusRegionId : null);
+  }, [mode, focusRegionId]);
+  const closeZoneNotice = useCallback(() => setZoneNoticeRegionId(null), []);
   // Every way back to the planet (the button, a double-click or double-tap on the
   // map) closes the open scene too.
   const requestView = useCallback(
@@ -264,6 +272,12 @@ function PlanetView({
         >
           {sceneHover.scene.title}
         </div>
+      )}
+      {zoneNoticeRegionId && (
+        <ZoneInProgressPopup
+          regionName={regionById(zoneNoticeRegionId, regions ?? DEFAULT_REGIONS)?.name ?? ""}
+          onClose={closeZoneNotice}
+        />
       )}
     </>
   );
